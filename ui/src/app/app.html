@@ -2,7 +2,7 @@
   <div class="container-fluid">
     <a class="navbar-brand d-flex align-items-center" href="#">
       <img src="assets/icons/android-chrome-192x192.png" alt="MeTube Logo" height="32" class="me-2">
-      MeTube
+      Taiv Downloader
     </a>
     <div class="download-metrics">
       @if (activeDownloads > 0) {
@@ -171,7 +171,7 @@
                     </select>
                   </div>
                 </div>
-                <div class="col-md-6">
+                <!-- <div class="col-md-6">
                   <div class="input-group">
                     <span class="input-group-text">Download Folder</span>
                     @if (customDirs$ | async; as customDirs) {
@@ -190,8 +190,7 @@
                       ngbTooltip="Choose where to save downloads. Type to create a new folder." />
                   }
                   </div>
-           
-                </div>
+                </div> -->
                 <div class="col-md-6">
                   <div class="input-group">
                     <span class="input-group-text">Custom Name Prefix</span>
@@ -322,10 +321,10 @@
       Connecting to server...
     </div>
   }
-  <div class="metube-section-header">Downloading</div>
+  <div class="metube-section-header">Queue</div>
   <div class="px-2 py-3 border-bottom">
     <button type="button" class="btn btn-link text-decoration-none px-0 me-4" disabled #queueDelSelected (click)="delSelectedDownloads('queue')"><fa-icon [icon]="faTrashAlt" />&nbsp; Cancel selected</button>
-    <button type="button" class="btn btn-link text-decoration-none px-0 me-4" disabled #queueDownloadSelected (click)="startSelectedDownloads('queue')"><fa-icon [icon]="faDownload" />&nbsp; Download selected</button>
+    <button type="button" class="btn btn-link text-decoration-none px-0 me-4" disabled #queueDownloadSelected (click)="startSelectedDownloads('queue')"><fa-icon [icon]="faDownload" />&nbsp; Start selected</button>
   </div>
   <div class="overflow-auto">
     <table class="table">
@@ -376,7 +375,7 @@
     <button type="button" class="btn btn-link text-decoration-none px-0 me-4" disabled #doneClearCompleted (click)="clearCompletedDownloads()"><fa-icon [icon]="faCheckCircle" />&nbsp; Clear completed</button>
     <button type="button" class="btn btn-link text-decoration-none px-0 me-4" disabled #doneClearFailed (click)="clearFailedDownloads()"><fa-icon [icon]="faTimesCircle" />&nbsp; Clear failed</button>
     <button type="button" class="btn btn-link text-decoration-none px-0 me-4" disabled #doneRetryFailed (click)="retryFailedDownloads()"><fa-icon [icon]="faRedoAlt" />&nbsp; Retry failed</button>
-    <button type="button" class="btn btn-link text-decoration-none px-0 me-4" disabled #doneDownloadSelected (click)="downloadSelectedFiles()"><fa-icon [icon]="faDownload" />&nbsp; Download Selected</button>
+    <!-- <button type="button" class="btn btn-link text-decoration-none px-0 me-4" disabled #doneDownloadSelected (click)="downloadSelectedFiles()"><fa-icon [icon]="faDownload" />&nbsp; Download Selected</button> -->
   </div>
   <div class="overflow-auto">
     <table class="table">
@@ -427,8 +426,8 @@
                 @if (download.value.status === 'error') {
                   <button type="button" class="btn btn-link" (click)="retryDownload(download.key, download.value)"><fa-icon [icon]="faRedoAlt" /></button>
                 }
-                @if (download.value.filename) {
-                  <a href="{{buildDownloadLink(download.value)}}" download class="btn btn-link"><fa-icon [icon]="faDownload" /></a>
+                @if (download.value.filename && buildS3ConsoleLink(download.value)) {
+                  <a href="{{buildS3ConsoleLink(download.value)}}" target="_blank" class="btn btn-link" title="Open in S3 Console"><fa-icon [icon]="faCloud" /></a>
                 }
                 <a href="{{download.value.url}}" target="_blank" class="btn btn-link"><fa-icon [icon]="faExternalLinkAlt" /></a>
                 <button type="button" class="btn btn-link" (click)="delDownload('done', download.key)"><fa-icon [icon]="faTrashAlt" /></button>

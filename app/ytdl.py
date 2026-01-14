@@ -68,13 +68,13 @@ class DownloadInfo:
 class Download:
     manager = None
 
-    def __init__(self, download_dir, temp_dir, output_template, output_template_chapter, quality, format, ytdl_opts, info):
+    def __init__(self, download_dir, temp_dir, output_template, output_template_chapter, quality, format, ytdl_opts, info, cookies_from_browser=''):
         self.download_dir = download_dir
         self.temp_dir = temp_dir
         self.output_template = output_template
         self.output_template_chapter = output_template_chapter
         self.format = get_format(format, quality)
-        self.ytdl_opts = get_opts(format, quality, ytdl_opts)
+        self.ytdl_opts = get_opts(format, quality, ytdl_opts, cookies_from_browser)
         if "impersonate" in self.ytdl_opts:
             self.ytdl_opts["impersonate"] = yt_dlp.networking.impersonate.ImpersonateTarget.from_str(self.ytdl_opts["impersonate"])
         self.info = info
@@ -251,7 +251,7 @@ class PersistentQueue:
 
     def load(self):
         for k, v in self.saved_items():
-            self.dict[k] = Download(None, None, None, None, None, None, {}, v)
+            self.dict[k] = Download(None, None, None, None, None, None, {}, v, '')
 
     def exists(self, key):
         return key in self.dict
@@ -391,6 +391,152 @@ class DownloadQueue:
             await download.start(self.notifier)
             self._post_download_cleanup(download)
 
+    def _segment_and_upload_to_s3(self, s3_uploader, download, file_path, dldirectory):
+        """Segment file (video or audio) and upload segments to S3. Returns True if all segments uploaded successfully."""
+        import subprocess
+        
+        try:
+            segment_duration = int(self.config.SEGMENT_DURATION)
+            base_name, ext = os.path.splitext(download.info.filename)
+            
+            segment_dir = os.path.join(dldirectory, f"{base_name}_segments")
+            os.makedirs(segment_dir, exist_ok=True)
+            segment_pattern = os.path.join(segment_dir, f"segment_%03d{ext}")
+
+            # Segment the file using ffmpeg
+            ffmpeg_cmd = [
+                'ffmpeg',
+                '-i', file_path,
+                '-c', 'copy',
+                '-f', 'segment',
+                '-segment_time', str(segment_duration),
+                '-reset_timestamps', '1',
+                segment_pattern
+            ]
+            
+            log.info(f"Segmenting file: {download.info.filename} (duration: {segment_duration}s)")
+            result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                log.error(f"ffmpeg segmentation failed: {result.stderr}")
+                return False
+            
+            segment_files = sorted([f for f in os.listdir(segment_dir) if f.startswith('segment_')])
+            
+            if not segment_files:
+                log.error("No segments created")
+                return False
+            
+            log.info(f"Created {len(segment_files)} segments")
+            
+            # Upload each segment to S3
+            uploaded_count = 0
+            for segment_file in segment_files:
+                segment_path = os.path.join(segment_dir, segment_file)
+                
+                segment_num = segment_file.replace('segment_', '').replace(ext, '')
+                s3_filename = f"{download.info.id}_{base_name}_{segment_num}{ext}"
+                s3_key = f"{download.info.folder}/{s3_filename}" if download.info.folder else s3_filename
+                
+                success, msg, s3_url = s3_uploader.upload_file(segment_path, s3_key)
+                if success:
+                    log.info(f"Uploaded segment to S3: {s3_url}")
+                    uploaded_count += 1
+                    try:
+                        os.remove(segment_path)
+                    except Exception as e:
+                        log.warning(f"Failed to delete segment {segment_path}: {str(e)}")
+                else:
+                    log.error(f"Failed to upload segment {segment_file}: {msg}")
+            
+            # Clean up
+            try:
+                os.remove(file_path)
+                log.info(f"Deleted original file: {file_path}")
+            except Exception as e:
+                log.warning(f"Failed to delete original file {file_path}: {str(e)}")
+            
+            try:
+                os.rmdir(segment_dir)
+            except Exception as e:
+                log.warning(f"Failed to delete segment directory {segment_dir}: {str(e)}")
+            
+            if uploaded_count == len(segment_files):
+                log.info(f"All {uploaded_count} segments uploaded successfully")
+                return True
+            else:
+                log.error(f"Only {uploaded_count}/{len(segment_files)} segments uploaded successfully")
+                return False
+                
+        except Exception as e:
+            log.error(f"File segmentation error: {str(e)}")
+            return False
+
+    def _upload_to_s3_after_download(self, download):
+        """Upload completed download to S3 and delete local file. Returns True if successful."""
+        try:
+            from s3_upload import create_s3_uploader
+            s3_uploader = create_s3_uploader(self.config)
+            if not s3_uploader:
+                log.error("S3 uploader could not be created")
+                return False
+    
+            dldirectory, error_message = self.__calc_download_path(
+                download.info.quality, download.info.format, download.info.folder
+            )
+            if error_message:
+                log.error(f"S3 auto-upload failed: {error_message['msg']}")
+                return False
+            
+            file_path = os.path.join(dldirectory, download.info.filename)
+            
+            # Segment and upload if segmentation is enabled
+            if self.config.SEGMENT_DURATION and int(self.config.SEGMENT_DURATION) > 0:
+                main_success = self._segment_and_upload_to_s3(s3_uploader, download, file_path, dldirectory)
+            else:
+                # Else just upload to S3
+                s3_filename = f"{download.info.id}_{download.info.filename}"
+                s3_key = f"{download.info.folder}/{s3_filename}" if download.info.folder else s3_filename
+                
+                success, msg, s3_url = s3_uploader.upload_file(file_path, s3_key)
+                if success:
+                    log.info(f"Auto-uploaded to S3: {s3_url}")
+                    try:
+                        os.remove(file_path)
+                        log.info(f"Deleted local file after S3 upload: {file_path}")
+                    except Exception as e:
+                        log.warning(f"Failed to delete local file {file_path}: {str(e)}")
+                    main_success = True
+                else:
+                    log.error(f"S3 upload failed: {msg}")
+                    main_success = False
+            
+            chapter_success = True
+            if hasattr(download.info, 'chapter_files') and download.info.chapter_files:
+                for chapter_file in download.info.chapter_files:
+                    chapter_filename = chapter_file['filename']
+                    chapter_path = os.path.join(dldirectory, chapter_filename)
+                    chapter_s3_filename = f"{download.info.id}_{chapter_filename}"
+                    chapter_s3_key = f"{download.info.folder}/{chapter_s3_filename}" if download.info.folder else chapter_s3_filename
+                    
+                    ch_success, ch_msg, ch_s3_url = s3_uploader.upload_file(chapter_path, chapter_s3_key)
+                    if ch_success:
+                        log.info(f"Auto-uploaded chapter to S3: {ch_s3_url}")
+                        try:
+                            os.remove(chapter_path)
+                            log.info(f"Deleted local chapter file: {chapter_path}")
+                        except Exception as e:
+                            log.warning(f"Failed to delete chapter file {chapter_path}: {str(e)}")
+                    else:
+                        log.error(f"Failed to upload chapter {chapter_filename}: {ch_msg}")
+                        chapter_success = False
+            
+            return main_success and chapter_success
+                        
+        except Exception as e:
+            log.error(f"S3 auto-upload error: {str(e)}")
+            return False
+
     def _post_download_cleanup(self, download):
         if download.info.status != 'finished':
             if download.tmpfilename and os.path.isfile(download.tmpfilename):
@@ -405,6 +551,13 @@ class DownloadQueue:
             if download.canceled:
                 asyncio.create_task(self.notifier.canceled(download.info.url))
             else:
+                if download.info.status == 'finished' and self.config.S3_BUCKET:
+                    s3_success = self._upload_to_s3_after_download(download)
+                    if not s3_success:
+                        download.info.status = 'error'
+                        download.info.msg = 'Download succeeded but S3 upload failed'
+                        log.error(f"Marking download as failed due to S3 upload failure: {download.info.url}")
+                
                 self.done.put(download)
                 asyncio.create_task(self.notifier.completed(download.info))
 
@@ -457,7 +610,7 @@ class DownloadQueue:
         if playlist_item_limit > 0:
             log.info(f'playlist limit is set. Processing only first {playlist_item_limit} entries')
             ytdl_options['playlistend'] = playlist_item_limit
-        download = Download(dldirectory, self.config.TEMP_DIR, output, output_chapter, dl.quality, dl.format, ytdl_options, dl)
+        download = Download(dldirectory, self.config.TEMP_DIR, output, output_chapter, dl.quality, dl.format, ytdl_options, dl, self.config.COOKIES_FROM_BROWSER)
         if auto_start is True:
             self.queue.put(download)
             asyncio.create_task(self.__start_download(download))

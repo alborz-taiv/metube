@@ -51,7 +51,7 @@ def get_format(format: str, quality: str) -> str:
     raise Exception(f"Unkown format {format}")
 
 
-def get_opts(format: str, quality: str, ytdl_opts: dict) -> dict:
+def get_opts(format: str, quality: str, ytdl_opts: dict, cookies_from_browser: str = '') -> dict:
     """
     Returns extra download options
     Mostly postprocessing options
@@ -101,4 +101,15 @@ def get_opts(format: str, quality: str, ytdl_opts: dict) -> dict:
     opts["postprocessors"] = postprocessors + (
         opts["postprocessors"] if "postprocessors" in opts else []
     )
+    
+    # Add cookies from browser if configured (required for YouTube as of 2025)
+    # Supports comma-separated list of browsers to try in order
+    if cookies_from_browser and "cookiesfrombrowser" not in opts:
+        # Split by comma and strip whitespace, filter empty strings
+        browsers = [b.strip() for b in cookies_from_browser.split(',') if b.strip()]
+        if browsers:
+            # yt-dlp will try each browser in order until one works
+            # Convert list to tuple (yt-dlp expects tuple of strings)
+            opts["cookiesfrombrowser"] = tuple(browsers)
+    
     return opts

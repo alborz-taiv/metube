@@ -138,6 +138,11 @@ export class DownloadsService {
     this[where].forEach((dl: Download) => { if (filter(dl)) ids.push(dl.url) });
     return this.delById(where, ids);
   }
+
+  public uploadToS3(ids: string[]) {
+    return this.http.post('upload_to_s3', {ids: ids});
+  }
+
   public addDownloadByUrl(url: string): Promise<{
     response: Status} | {
     status: string;

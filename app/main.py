@@ -15,9 +15,14 @@ import json
 import pathlib
 import re
 from watchfiles import DefaultFilter, Change, awatch
+from dotenv import load_dotenv
 
 from ytdl import DownloadQueueNotifier, DownloadQueue
 from yt_dlp.version import __version__ as yt_dlp_version
+from s3_upload import create_s3_uploader, S3UploadError
+
+# Load environment variables from .env file
+load_dotenv()
 
 log = logging.getLogger('main')
 
@@ -72,6 +77,12 @@ class Config:
         'MAX_CONCURRENT_DOWNLOADS': 3,
         'LOGLEVEL': 'INFO',
         'ENABLE_ACCESSLOG': 'false',
+        'S3_BUCKET': '',
+        'S3_REGION': 'us-east-1',
+        'S3_PREFIX': '',
+        'S3_ENDPOINT_URL': '',
+        'COOKIES_FROM_BROWSER': '',
+        'SEGMENT_DURATION': '30',
     }
 
     _BOOLEAN = ('DOWNLOAD_DIRS_INDEXABLE', 'CUSTOM_DIRS', 'CREATE_CUSTOM_DIRS', 'DELETE_FILE_ON_TRASHCAN', 'HTTPS', 'ENABLE_ACCESSLOG')
@@ -282,6 +293,167 @@ async def start(request):
     log.info(f"Received request to start pending downloads for ids: {ids}")
     status = await dqueue.start_pending(ids)
     return web.Response(text=serializer.encode(status))
+
+@routes.post(config.URL_PREFIX + 'upload_to_s3')
+async def upload_to_s3(request):
+    post = await request.json()
+    ids = post.get('ids')
+    if not ids:
+        log.error("Bad request: missing 'ids'")
+        raise web.HTTPBadRequest()
+    
+    log.info(f"Received request to upload {len(ids)} files to S3")
+    
+    # Check if S3 is configured
+    if not config.S3_BUCKET:
+        log.error("S3 upload requested but S3_BUCKET is not configured")
+        return web.Response(
+            text=serializer.encode({
+                'status': 'error',
+                'msg': 'S3 is not configured. Please set S3_BUCKET environment variable.'
+            })
+        )
+    
+    # Create S3 uploader
+    try:
+        s3_uploader = create_s3_uploader(config)
+        if not s3_uploader:
+            raise S3UploadError("Failed to create S3 uploader")
+    except S3UploadError as e:
+        log.error(f"S3 uploader initialization failed: {str(e)}")
+        return web.Response(
+            text=serializer.encode({
+                'status': 'error',
+                'msg': f'S3 configuration error: {str(e)}'
+            })
+        )
+    
+    results = []
+    
+    for download_id in ids:
+        if not dqueue.done.exists(download_id):
+            log.warn(f'Requested S3 upload for non-existent download {download_id}')
+            results.append({
+                'id': download_id,
+                'status': 'error',
+                'msg': 'Download not found in completed queue'
+            })
+            continue
+        
+        dl = dqueue.done.get(download_id)
+        
+        # Check if download was successful
+        if dl.info.status != 'finished':
+            log.warn(f'Requested S3 upload for failed download {download_id}')
+            results.append({
+                'id': download_id,
+                'status': 'error',
+                'msg': f'Download status is {dl.info.status}, not finished'
+            })
+            continue
+        
+        # Check if we have a filename
+        if not hasattr(dl.info, 'filename') or not dl.info.filename:
+            log.warn(f'Download {download_id} has no filename')
+            results.append({
+                'id': download_id,
+                'status': 'error',
+                'msg': 'No filename available for this download'
+            })
+            continue
+        
+        # Build full file path
+        dldirectory, error_message = dqueue._DownloadQueue__calc_download_path(
+            dl.info.quality, dl.info.format, dl.info.folder
+        )
+        if error_message:
+            results.append({
+                'id': download_id,
+                'status': 'error',
+                'msg': error_message['msg']
+            })
+            continue
+        
+        file_path = os.path.join(dldirectory, dl.info.filename)
+        
+        # Build S3 key with video ID prefix to prevent collisions
+        s3_filename = f"{dl.info.id}_{dl.info.filename}"
+        if dl.info.folder:
+            s3_key = f"{dl.info.folder}/{s3_filename}"
+        else:
+            s3_key = s3_filename
+        
+        # Upload main file
+        success, msg, s3_url = s3_uploader.upload_file(file_path, s3_key)
+        
+        result = {
+            'id': download_id,
+            'title': dl.info.title,
+            'status': 'success' if success else 'error',
+            'msg': msg,
+            'filename': dl.info.filename
+        }
+        
+        if success:
+            result['s3_url'] = s3_url
+            
+            # Delete local file after successful upload
+            try:
+                os.remove(file_path)
+                log.info(f"Deleted local file after S3 upload: {file_path}")
+            except Exception as e:
+                log.warning(f"Failed to delete local file {file_path}: {str(e)}")
+            
+            # Upload chapter files if they exist
+            if hasattr(dl.info, 'chapter_files') and dl.info.chapter_files:
+                chapter_results = []
+                for chapter_file in dl.info.chapter_files:
+                    chapter_filename = chapter_file['filename']
+                    chapter_path = os.path.join(dldirectory, chapter_filename)
+                    
+                    # Build S3 key for chapter file with video ID prefix
+                    chapter_s3_filename = f"{dl.info.id}_{chapter_filename}"
+                    if dl.info.folder:
+                        chapter_s3_key = f"{dl.info.folder}/{chapter_s3_filename}"
+                    else:
+                        chapter_s3_key = chapter_s3_filename
+                    
+                    ch_success, ch_msg, ch_s3_url = s3_uploader.upload_file(chapter_path, chapter_s3_key)
+                    
+                    # Delete chapter file after successful upload
+                    if ch_success:
+                        try:
+                            os.remove(chapter_path)
+                            log.info(f"Deleted local chapter file after S3 upload: {chapter_path}")
+                        except Exception as e:
+                            log.warning(f"Failed to delete chapter file {chapter_path}: {str(e)}")
+                    
+                    chapter_results.append({
+                        'filename': chapter_filename,
+                        'status': 'success' if ch_success else 'error',
+                        'msg': ch_msg,
+                        's3_url': ch_s3_url if ch_success else None
+                    })
+                
+                result['chapter_files'] = chapter_results
+        
+        results.append(result)
+    
+    # Summary
+    successful = sum(1 for r in results if r['status'] == 'success')
+    failed = sum(1 for r in results if r['status'] == 'error')
+    
+    log.info(f"S3 upload complete: {successful} succeeded, {failed} failed")
+    
+    return web.Response(text=serializer.encode({
+        'status': 'ok',
+        'results': results,
+        'summary': {
+            'total': len(results),
+            'successful': successful,
+            'failed': failed
+        }
+    }))
 
 @routes.get(config.URL_PREFIX + 'history')
 async def history(request):

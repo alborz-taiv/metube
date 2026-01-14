@@ -50,6 +50,102 @@ Certain values can be set via environment variables, using the `-e` parameter on
   * Set this to an SSD or RAM filesystem (e.g., `tmpfs`) for better performance.
   * __Note__: Using a RAM filesystem may prevent downloads from being resumed.
 
+### ☁️ S3 Upload Configuration
+
+MeTube supports uploading completed downloads to AWS S3 or S3-compatible storage services. When configured, a "Publish Selected to S3" button appears in the Completed section of the UI.
+
+* __S3_BUCKET__: Name of the S3 bucket where files will be uploaded. If not set, S3 functionality will be disabled. No default value.
+* __S3_REGION__: AWS region where your S3 bucket is located. Defaults to `us-east-1`.
+* __S3_PREFIX__: Optional prefix (folder path) to prepend to all uploaded files in S3. For example, setting this to `metube-downloads` will upload files to `s3://your-bucket/metube-downloads/...`. Defaults to empty (root of bucket).
+* __S3_ENDPOINT_URL__: Optional custom S3 endpoint URL for S3-compatible services (e.g., MinIO, DigitalOcean Spaces, Wasabi). Leave empty for AWS S3. No default value.
+* __AWS_ACCESS_KEY_ID__: AWS access key ID for authentication. This is a standard AWS environment variable.
+* __AWS_SECRET_ACCESS_KEY__: AWS secret access key for authentication. This is a standard AWS environment variable.
+
+#### Example Docker Compose Configuration with S3:
+
+```yaml
+services:
+  metube:
+    image: ghcr.io/alexta69/metube
+    container_name: metube
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    volumes:
+      - /path/to/downloads:/downloads
+    environment:
+      - AWS_ACCESS_KEY_ID=your_access_key_id
+      - AWS_SECRET_ACCESS_KEY=your_secret_access_key
+      - S3_BUCKET=your-bucket-name
+      - S3_REGION=us-east-1
+      - S3_PREFIX=metube-downloads
+```
+
+#### Example with S3-Compatible Service (MinIO):
+
+```yaml
+services:
+  metube:
+    image: ghcr.io/alexta69/metube
+    container_name: metube
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    volumes:
+      - /path/to/downloads:/downloads
+    environment:
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - S3_BUCKET=videos
+      - S3_ENDPOINT_URL=http://minio:9000
+      - S3_REGION=us-east-1
+```
+
+#### Usage:
+
+1. Configure the environment variables as shown above
+2. Download videos normally through MeTube
+3. Once downloads are complete, select the videos you want to upload
+4. Click the "Publish Selected to S3" button in the Completed section
+5. Files will be uploaded to your S3 bucket while remaining in local storage
+
+__Note__: The S3 upload feature uploads files after they have been downloaded locally. Files remain on the local filesystem after being uploaded to S3. If the download was organized into a custom folder, the same folder structure will be preserved in S3.
+
+### 🎬 Automatic File Segmentation
+
+MeTube can automatically segment all downloads (video and audio) into smaller clips before uploading to S3.
+
+* __SEGMENT_DURATION__: Duration of each segment in seconds. Defaults to `30`. Set to empty or `0` to disable segmentation and upload full files.
+
+When segmentation is enabled:
+- Both video and audio files are segmented uniformly using ffmpeg
+- Segments are uploaded with naming pattern: `{videoId}_{filename}_001.mp4`, `{videoId}_{filename}_002.mp4`, etc.
+- Only segments are uploaded to S3 (the original full file is NOT uploaded)
+- Uses ffmpeg with `-c copy` (stream copy, no re-encoding) for fast segmentation
+- Local files are automatically deleted after successful upload
+
+#### Example Docker Compose Configuration with Segmentation:
+
+```yaml
+services:
+  metube:
+    image: ghcr.io/alexta69/metube
+    container_name: metube
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    volumes:
+      - /path/to/downloads:/downloads
+    environment:
+      - AWS_ACCESS_KEY_ID=your_access_key_id
+      - AWS_SECRET_ACCESS_KEY=your_secret_access_key
+      - S3_BUCKET=your-bucket-name
+      - S3_REGION=us-east-1
+      - SEGMENT_DURATION=30  # Segment into 30-second clips
+```
+
+To disable segmentation and upload full files, set `SEGMENT_DURATION=0` or omit it entirely.
+
 ### 📝 File Naming & yt-dlp
 
 * __OUTPUT_TEMPLATE__: The template for the filenames of the downloaded videos, formatted according to [this spec](https://github.com/yt-dlp/yt-dlp/blob/master/README.md#output-template). Defaults to `%(title)s.%(ext)s`.

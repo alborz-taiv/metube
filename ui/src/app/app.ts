@@ -6,7 +6,7 @@ import { FormsModule } from '@angular/forms';
 import { FontAwesomeModule } from '@fortawesome/angular-fontawesome';
 import { NgbModule } from '@ng-bootstrap/ng-bootstrap';
 import { NgSelectModule } from '@ng-select/ng-select';  
-import { faTrashAlt, faCheckCircle, faTimesCircle, faRedoAlt, faSun, faMoon, faCheck, faCircleHalfStroke, faDownload, faExternalLinkAlt, faFileImport, faFileExport, faCopy, faClock, faTachometerAlt } from '@fortawesome/free-solid-svg-icons';
+import { faTrashAlt, faCheckCircle, faTimesCircle, faRedoAlt, faSun, faMoon, faCheck, faCircleHalfStroke, faDownload, faExternalLinkAlt, faFileImport, faFileExport, faCopy, faClock, faTachometerAlt, faCloud } from '@fortawesome/free-solid-svg-icons';
 import { faGithub } from '@fortawesome/free-brands-svg-icons';
 import { CookieService } from 'ngx-cookie-service';
 import { DownloadsService } from './services/downloads.service';
@@ -80,6 +80,7 @@ export class App implements AfterViewInit, OnInit {
   readonly doneClearFailed = viewChild.required<ElementRef>('doneClearFailed');
   readonly doneRetryFailed = viewChild.required<ElementRef>('doneRetryFailed');
   readonly doneDownloadSelected = viewChild.required<ElementRef>('doneDownloadSelected');
+  readonly doneUploadS3 = viewChild.required<ElementRef>('doneUploadS3');
 
   faTrashAlt = faTrashAlt;
   faCheckCircle = faCheckCircle;
@@ -97,9 +98,10 @@ export class App implements AfterViewInit, OnInit {
   faGithub = faGithub;
   faClock = faClock;
   faTachometerAlt = faTachometerAlt;
+  faCloud = faCloud;
 
   constructor() {
-    this.format = this.cookieService.get('metube_format') || 'any';
+    this.format = this.cookieService.get('metube_format') || 'mp4';
     // Needs to be set or qualities won't automatically be set
     this.setQualities()
     this.quality = this.cookieService.get('metube_quality') || 'best';
@@ -287,6 +289,7 @@ export class App implements AfterViewInit, OnInit {
   doneSelectionChanged(checked: number) {
     this.doneDelSelected().nativeElement.disabled = checked == 0;
     this.doneDownloadSelected().nativeElement.disabled = checked == 0;
+    this.doneUploadS3().nativeElement.disabled = checked == 0;
   }
 
   setQualities() {
@@ -380,6 +383,49 @@ export class App implements AfterViewInit, OnInit {
     });
   }
 
+  uploadSelectedToS3() {
+    const ids: string[] = [];
+    this.downloads.done.forEach((dl, key) => {
+      if (dl.status === 'finished' && dl.checked) {
+        ids.push(key);
+      }
+    });
+    if (ids.length === 0) {
+      alert('No completed downloads selected');
+      return;
+    }
+    if (confirm(`Upload ${ids.length} file(s) to S3?`)) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      this.downloads.uploadToS3(ids).subscribe({
+        next: (result: any) => {
+          // Handle results
+          if (result.status === 'error') {
+            alert(`S3 Upload Error: ${result.msg}`);
+            return;
+          }
+          const successful = result.results.filter((r: any) => r.status === 'success').length;
+          const failed = result.results.filter((r: any) => r.status === 'error').length;
+          let message = `S3 Upload Complete:\n${successful} succeeded, deleted local file(s)`;
+          if (failed > 0) {
+            message += `, ${failed} failed, but local file(s) are available`;
+          }
+          // Show detailed errors for failed uploads
+          const failedResults = result.results.filter((r: any) => r.status === 'error');
+          if (failedResults.length > 0 && failedResults.length <= 5) {
+            message += '\n\nFailed uploads:';
+            failedResults.forEach((r: any) => {
+              message += `\n- ${r.title || r.id}: ${r.msg}`;
+            });
+          }
+          alert(message);
+        },
+        error: (err) => {
+          alert(`S3 Upload Error: ${err.error?.msg || 'Unknown error'}`);
+        }
+      });
+    }
+  }
+
   buildDownloadLink(download: Download) {
     let baseDir = this.downloads.configuration["PUBLIC_HOST_URL"];
     if (download.quality == 'audio' || download.filename.endsWith('.mp3')) {
@@ -391,6 +437,27 @@ export class App implements AfterViewInit, OnInit {
     }
 
     return baseDir + encodeURIComponent(download.filename);
+  }
+
+  buildS3ConsoleLink(download: Download) {
+    const s3Bucket = this.downloads.configuration["S3_BUCKET"];
+    const s3Region = this.downloads.configuration["S3_REGION"] || 'us-east-1';
+    
+    if (!s3Bucket) {
+      return '';
+    }
+    
+    // Build the S3 key with video ID prefix (matches backend behavior)
+    const s3Filename = `${download.id}_${download.filename}`;
+    let s3Key = s3Filename;
+    if (download.folder) {
+      s3Key = `${download.folder}/${s3Filename}`;
+    }
+    
+    // URL encode the S3 key for the prefix parameter
+    const encodedKey = encodeURIComponent(s3Key);
+    
+    return `https://${s3Region}.console.aws.amazon.com/s3/object/${s3Bucket}?region=${s3Region}&prefix=${encodedKey}`;
   }
 
   buildResultItemTooltip(download: Download) {
